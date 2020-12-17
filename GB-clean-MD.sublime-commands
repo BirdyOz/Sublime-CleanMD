@@ -1,0 +1,10 @@
+[
+    {
+        "caption": "BirdyOz - Clean MarkDown",
+        "command": "clean_md",
+        "args":
+        {
+            "type": "normal"
+        }
+    }
+]

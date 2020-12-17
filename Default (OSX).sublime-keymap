@@ -1,0 +1,10 @@
+[
+    {
+        "keys": ["command+control+\\"],
+        "command": "clean_md",
+        "args":
+        {
+            "type": "normal"
+        }
+    }
+]
