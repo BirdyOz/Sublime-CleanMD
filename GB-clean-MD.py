@@ -42,7 +42,6 @@ def replacestrings(self, edit, type, substitutions):
     if "bootstrapcdn" not in string:
         string = bootstrap + string
 
-
     # Output to view
     self.view.replace(edit, sel[0], string)
 
@@ -50,6 +49,8 @@ def replacestrings(self, edit, type, substitutions):
     status_msg = "Strings replaced = " + str(strings_replaced)
     self.view.set_status('str_replaced',status_msg)
 
+    # Format MD tables
+    self.view.run_command("markdown_table_format")
+
     # Launch in browser
     self.view.run_command("omni_markup_preview")
-
