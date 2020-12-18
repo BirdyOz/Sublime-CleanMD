@@ -13,7 +13,7 @@ class CleanMd(sublime_plugin.TextCommand):
         ('^\\\(\d\.) +', '\\1 '),            # Replace \1. etc with 1.
         ('#+\n', ''),                       # Empty headings
         ('((# |\*|\d\.)) {2,}', '\\1 '),     # Blank spaces before headings, bulets, numbers
-        ('# \*\*(.*?)\*\*', ' \\1'),         # Bolded headings
+        ('# +\*\*(.*?)\*\*', ' \\1'),         # Bolded headings
         ('(^\* .*)\n{2,}(?=\*)', '\\1\n'),   # Collapse lines b/n bullets
         ('(^\d\. .*)\n{2,}(?=\d)', '\\1\n'), # Collapse lines b/n numbered lists
         ('\n{3,}', '\n\n')                   # Multiple empty lines
