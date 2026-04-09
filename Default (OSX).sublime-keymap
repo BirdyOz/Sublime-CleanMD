@@ -1,10 +1,11 @@
+
 [
     {
         "keys": ["command+control+\\"],
-        "command": "clean_md",
-        "args":
-        {
-            "type": "normal"
-        }
+        "command": "clean_md"
+    },
+    {
+        "keys": ["command+shift+control+\\"],
+        "command": "html_to_md"
     }
 ]

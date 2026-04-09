@@ -10,8 +10,8 @@ It also adds Bootstrap and FA support to the generated HTML.
 **What is cleans**
 
 * Replace bullets (·• etc) with \*
-* Replace \\1. etc with 1.
-* Remove Empty headings (eg ##)
+* Replace \\1. etc with 1\.
+* Remove Empty headings (eg \#\# )
 * Blank spaces before headings, bullets, numbers
 * Bolded headings
 * Collapse blank lines between bullets
