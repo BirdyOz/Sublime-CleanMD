@@ -59,7 +59,7 @@ def normalize_html_fragments(string):
     return str(soup)
 
 def clean_md_text(string):
-    """Apply the markdown cleanup rules to a string."""
+    """Apply the canonical markdown cleanup rules to a string."""
     substitutions = [
         ('^( *)[-\\+·•ð§] +', '\\1- '),       # Replace decorative bullets with -
         ('^\\\\(\\d+\\.) +', '\\1 '),          # Replace escaped \1. etc with 1.
@@ -71,7 +71,6 @@ def clean_md_text(string):
         ('^( *)\\+ +', '\\1- '),       # Canonicalize + bullets to -
         ('<li><p>(.*?)</p></li>', '<li>\\1</li>'), # remove li>p
         ('(#+) +\\*\\*(.*?)\\*\\*', '\\1 \\2'),         # Un-bold headings
-        ('- +\\.', '-.'),                     # Remove space between - and .
         ('> +([\\.,])', '>\\1'),               # Remove space between end tag and , or .
         ('\\[\\[\\d+\\?\\]\\]\\(#_ftn\\d+\\)', ''),   # Remove footnotes
         ('\\?*time\\d{8,}', '')               # Remove Moodle timestamps from image src
@@ -130,9 +129,15 @@ def replacestrings(self, edit):
     self.view.replace(edit, sel[0], string)
 
     # Launch in browser
-
-    self.view.run_command("run_format", {"uid": "prettier", "type": "beautifier"})
-    self.view.run_command("omni_markup_preview")
+    if self.view.window() is not None:
+        try:
+            self.view.run_command("run_format", {"uid": "prettier", "type": "beautifier"})
+        except Exception:
+            pass
+        try:
+            self.view.run_command("omni_markup_preview")
+        except Exception:
+            pass
 
 class CleanMdRunTestsCommand(sublime_plugin.WindowCommand):
 

@@ -1,14 +1,10 @@
 [
     {
         "caption": "BirdyOz - Clean MarkDown",
-        "command": "clean_md",
-        "args":
-        {
-            "type": "normal"
-        }
+        "command": "clean_md"
     },
     {
-        "caption": "BirdyOz - HTML to MD",
-        "command": "html_to_md"
+        "caption": "BirdyOz - Run CleanMD Tests",
+        "command": "clean_md_run_tests"
     },
 ]
