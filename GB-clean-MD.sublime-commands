@@ -7,4 +7,12 @@
         "caption": "BirdyOz - Run CleanMD Tests",
         "command": "clean_md_run_tests"
     },
+    {
+        "caption": "BirdyOz - Format HTML Blocks",
+        "command": "clean_md_format_html_blocks"
+    },
+    {
+        "caption": "BirdyOz - Prettierd Smoke Test",
+        "command": "clean_md_prettierd_smoke_test"
+    },
 ]

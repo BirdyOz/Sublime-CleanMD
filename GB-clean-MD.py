@@ -1,4 +1,4 @@
-import sublime, sublime_plugin, re, os
+import sublime, sublime_plugin, re, os, shutil, subprocess
 from bs4 import BeautifulSoup
 
 
@@ -21,42 +21,240 @@ class CleanMd(sublime_plugin.TextCommand):
             replacestrings(self, edit)
 
 def normalize_html_fragments(string):
-    """Safely normalize a few HTML attributes inside mixed HTML/Markdown."""
+    """Safely normalize img and anchor tags without reparsing the whole document."""
     if "<" not in string or ">" not in string:
         return string
 
-    soup = BeautifulSoup(string, "html.parser")
+    def normalize_img_tag(match):
+        tag_markup = match.group(0)
+        soup = BeautifulSoup(tag_markup, "html.parser")
+        tag = soup.find("img")
+        if tag is None:
+            return tag_markup
 
-    for img in soup.find_all("img"):
-        style = img.get("style")
-        if not style:
+        style = tag.get("style")
+        if style:
+            rules = []
+            for rule in style.split(";"):
+                rule = rule.strip()
+                if not rule:
+                    continue
+                if rule.lower().startswith("width:"):
+                    continue
+                rules.append(rule)
+
+            if rules:
+                tag["style"] = "; ".join(rules)
+            else:
+                del tag["style"]
+
+        return str(tag)
+
+    def normalize_anchor_open_tag(match):
+        open_tag = match.group(0)
+        soup = BeautifulSoup(open_tag + "</a>", "html.parser")
+        tag = soup.find("a")
+        if tag is None:
+            return open_tag
+
+        href = tag.get("href", "")
+        if tag.has_attr("target"):
+            del tag["target"]
+        if tag.has_attr("rel"):
+            del tag["rel"]
+        if re.match(r"^https?://", href, flags=re.IGNORECASE):
+            tag["target"] = "_blank"
+            tag["rel"] = ["noopener", "noreferrer"]
+
+        serialised = str(tag)
+        if serialised.endswith("</a>"):
+            return serialised[:-4]
+        return open_tag
+
+    string = re.sub(r"<img\b[^>]*?>", normalize_img_tag, string, flags=re.IGNORECASE | re.DOTALL)
+    string = re.sub(r"<a\b[^>]*?>", normalize_anchor_open_tag, string, flags=re.IGNORECASE | re.DOTALL)
+    return string
+
+def find_top_level_html_blocks(string, tag_names=("figure", "div")):
+    """Return source ranges for top-level figure/div blocks that begin a line."""
+    tag_pattern = "|".join(re.escape(tag) for tag in tag_names)
+    opener = re.compile(r'(?m)^[ \t]*<({})\b[^>]*?>'.format(tag_pattern), flags=re.IGNORECASE)
+    tag_re = re.compile(r'<(/?)({})\b[^>]*?>'.format(tag_pattern), flags=re.IGNORECASE | re.DOTALL)
+
+    blocks = []
+    position = 0
+    while True:
+        match = opener.search(string, position)
+        if not match:
+            break
+
+        start = match.start()
+        depth = 0
+        end = None
+        for tag_match in tag_re.finditer(string, start):
+            is_closing = tag_match.group(1) == "/"
+            markup = tag_match.group(0)
+            is_self_closing = markup.rstrip().endswith("/>")
+
+            if not is_closing:
+                if not is_self_closing:
+                    depth += 1
+            else:
+                depth -= 1
+                if depth == 0:
+                    end = tag_match.end()
+                    break
+
+        if end is None:
+            position = match.end()
             continue
 
-        rules = []
-        for rule in style.split(";"):
-            rule = rule.strip()
-            if not rule:
-                continue
-            if rule.lower().startswith("width:"):
-                continue
-            rules.append(rule)
+        while end < len(string) and string[end] in "\t ":
+            end += 1
+        if end < len(string) and string[end] == "\n":
+            end += 1
 
-        if rules:
-            img["style"] = "; ".join(rules)
-        else:
-            del img["style"]
+        blocks.append({
+            "start": start,
+            "end": end,
+            "tag": match.group(1).lower(),
+        })
+        position = end
 
-    for a in soup.find_all("a"):
-        href = a.get("href", "")
-        if a.has_attr("target"):
-            del a["target"]
-        if a.has_attr("rel"):
-            del a["rel"]
-        if re.match(r"^https?://", href, flags=re.IGNORECASE):
-            a["target"] = "_blank"
-            a["rel"] = ["noopener", "noreferrer"]
+    return blocks
+
+def apply_base_indentation(text, indent):
+    """Indent formatted fragment lines to match the block's original base indent."""
+    if not indent:
+        return text
+
+    lines = text.splitlines()
+    return "\n".join((indent + line) if line else line for line in lines)
+
+def repair_nested_paragraph_wrappers(fragment):
+    """Unwrap invalid outer <p> tags that contain only nested block <p> tags."""
+    soup = BeautifulSoup(fragment, "html.parser")
+
+    changed = True
+    while changed:
+        changed = False
+        for p_tag in soup.find_all("p"):
+            child_tags = [child for child in p_tag.children if getattr(child, "name", None) is not None]
+            if not child_tags:
+                continue
+
+            only_nested_p = True
+            for child in p_tag.children:
+                name = getattr(child, "name", None)
+                if name is None:
+                    if str(child).strip():
+                        only_nested_p = False
+                        break
+                    continue
+                if name != "p":
+                    only_nested_p = False
+                    break
+
+            if only_nested_p:
+                p_tag.unwrap()
+                changed = True
+                break
 
     return str(soup)
+
+def format_html_fragment_with_prettier(fragment, prettier_binary, base_indent=""):
+    """Format one HTML fragment with Prettier via stdin/stdout."""
+    had_trailing_newline = fragment.endswith("\n")
+    fragment = repair_nested_paragraph_wrappers(fragment)
+    result = subprocess.run(
+        [
+            prettier_binary,
+            "--parser",
+            "html",
+            "--print-width",
+            "800",
+            "--tab-width",
+            "4",
+            "--html-whitespace-sensitivity",
+            "css",
+            "--prose-wrap",
+            "preserve",
+            "--embedded-language-formatting",
+            "auto",
+            "--stdin-filepath",
+            "/tmp/cleanmd-html-fragment.html",
+        ],
+        input=fragment,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(result.stdout or result.stderr or "Prettier failed")
+
+    formatted = result.stdout.rstrip("\n")
+    formatted = apply_base_indentation(formatted, base_indent)
+    if had_trailing_newline:
+        formatted += "\n"
+    return formatted
+
+def is_blockish_line(stripped):
+    """Return True for lines that should not be treated as plain paragraph text."""
+    if not stripped:
+        return True
+
+    block_patterns = [
+        r'^([-*+]|\d+\.)\s+',
+        r'^#{1,6}\s+',
+        r'^>',
+        r'^```',
+        r'^~~~',
+        r'^\|',
+        r'^<',
+    ]
+    return any(re.match(pattern, stripped) for pattern in block_patterns)
+
+def looks_like_complete_paragraph_line(stripped):
+    """Heuristic for paragraph lines pasted from Word that should become separate paragraphs."""
+    if is_blockish_line(stripped):
+        return False
+
+    words = re.findall(r'\b\w+\b', stripped)
+    if len(words) < 5:
+        return False
+
+    return bool(re.search(r'[.!?]["\')\]]*$', stripped))
+
+def promote_word_paragraph_breaks(string):
+    """
+    Promote likely Word single line breaks into paragraph breaks.
+
+    This is intentionally conservative: it only inserts a blank line when two
+    consecutive non-blank lines both look like complete prose paragraphs.
+    """
+    lines = string.splitlines()
+    if len(lines) < 2:
+        return string
+
+    newlines = []
+    for index, line in enumerate(lines):
+        newlines.append(line)
+
+        if index == len(lines) - 1:
+            continue
+
+        current = line.strip()
+        nxt = lines[index + 1].strip()
+
+        if not current or not nxt:
+            continue
+
+        if looks_like_complete_paragraph_line(current) and looks_like_complete_paragraph_line(nxt):
+            newlines.append('')
+
+    return '\n'.join(newlines)
 
 def clean_md_text(string):
     """Apply the canonical markdown cleanup rules to a string."""
@@ -81,6 +279,7 @@ def clean_md_text(string):
         string = re.sub(old, new, string, flags=re.MULTILINE)
 
     string = normalize_html_fragments(string)
+    string = promote_word_paragraph_breaks(string)
 
     lines = string.splitlines()
     newlines = []
@@ -199,6 +398,16 @@ class CleanMdRunTestsCommand(sublime_plugin.WindowCommand):
                 "expected": "This has too many spaces"
             },
             {
+                "name": "Promote likely Word paragraph breaks",
+                "input": "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\nUt enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.\nExcepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.",
+                "expected": "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\n\nUt enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.\n\nExcepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum."
+            },
+            {
+                "name": "Do not promote paragraph breaks before lists",
+                "input": "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\n- One\n- Two",
+                "expected": "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\n\n- One\n- Two"
+            },
+            {
                 "name": "Simplify li paragraph wrappers",
                 "input": "<ul>\n<li><p>One</p></li>\n<li><p>Two</p></li>\n</ul>",
                 "expected": "<ul>\n<li>One</li>\n<li>Two</li>\n</ul>"
@@ -255,3 +464,193 @@ class CleanMdRunTestsCommand(sublime_plugin.WindowCommand):
         view.set_scratch(True)
         view.assign_syntax("Packages/Text/Plain text.tmLanguage")
         view.run_command("append", {"characters": report})
+
+class CleanMdPrettierdSmokeTestCommand(sublime_plugin.WindowCommand):
+
+    def run(self):
+        prettierd = shutil.which("prettierd") or "/opt/homebrew/bin/prettierd"
+        prettier = shutil.which("prettier") or "/opt/homebrew/bin/prettier"
+        sample = (
+            '<figure><img src="x"><figcaption><small>'
+            '<a href="https://example.com">Link</a>'
+            '</small></figcaption></figure>'
+        )
+
+        report_lines = [
+            "CleanMD prettierd smoke test",
+            "",
+            "Prettierd binary: {}".format(prettierd),
+            "Prettier binary: {}".format(prettier),
+            "",
+            "Input:",
+            sample,
+            "",
+        ]
+
+        if not os.path.exists(prettierd):
+            report_lines.extend([
+                "Result: prettierd binary not found",
+                "",
+                "Expected location was not available. If prettierd is installed,",
+                "check whether Sublime can see it in PATH.",
+            ])
+        else:
+            command_variants = [
+                {
+                    "label": "Prettierd variant 1: invoke <path>",
+                    "args": [prettierd, "invoke", "/tmp/cleanmd-prettierd-smoke.html"],
+                },
+                {
+                    "label": "Prettierd variant 2: invoke -- /tmp/cleanmd-prettierd-smoke.html",
+                    "args": [prettierd, "invoke", "--", "/tmp/cleanmd-prettierd-smoke.html"],
+                },
+                {
+                    "label": "Prettierd variant 3: invoke /tmp",
+                    "args": [prettierd, "invoke", "/tmp"],
+                },
+            ]
+
+            for variant in command_variants:
+                report_lines.extend([
+                    variant["label"],
+                    "Command: {}".format(" ".join(variant["args"])),
+                    "",
+                ])
+
+                try:
+                    result = subprocess.run(
+                        variant["args"],
+                        input=sample,
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    report_lines.extend([
+                        "Exit code: {}".format(result.returncode),
+                        "",
+                        "STDOUT:",
+                        result.stdout if result.stdout else "<empty>",
+                        "",
+                        "STDERR:",
+                        result.stderr if result.stderr else "<empty>",
+                        "",
+                    ])
+                except Exception as exc:
+                    report_lines.extend([
+                        "Result: invocation raised an exception",
+                        repr(exc),
+                        "",
+                    ])
+
+        report_lines.extend([
+            "Prettier stdin/stdout test",
+            "",
+        ])
+
+        if not os.path.exists(prettier):
+            report_lines.extend([
+                "Result: prettier binary not found",
+                "",
+            ])
+        else:
+            prettier_args = [
+                prettier,
+                "--parser",
+                "html",
+                "--stdin-filepath",
+                "/tmp/cleanmd-prettier-smoke.html",
+            ]
+            report_lines.extend([
+                "Command: {}".format(" ".join(prettier_args)),
+                "",
+            ])
+
+            try:
+                result = subprocess.run(
+                    prettier_args,
+                    input=sample,
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                report_lines.extend([
+                    "Exit code: {}".format(result.returncode),
+                    "",
+                    "STDOUT:",
+                    result.stdout if result.stdout else "<empty>",
+                    "",
+                    "STDERR:",
+                    result.stderr if result.stderr else "<empty>",
+                ])
+            except Exception as exc:
+                report_lines.extend([
+                    "Result: invocation raised an exception",
+                    repr(exc),
+                ])
+
+        self._show_report("\n".join(report_lines))
+
+    def _show_report(self, report):
+        view = self.window.new_file()
+        view.set_name("CleanMD Prettierd Smoke Test")
+        view.set_scratch(True)
+        view.assign_syntax("Packages/Text/Plain text.tmLanguage")
+        view.run_command("append", {"characters": report})
+
+class CleanMdFormatHtmlBlocksCommand(sublime_plugin.TextCommand):
+
+    def run(self, edit):
+        prettier = shutil.which("prettier") or "/opt/homebrew/bin/prettier"
+        if not os.path.exists(prettier):
+            sublime.message_dialog(
+                "CleanMD could not find prettier.\n\nExpected: {}".format(prettier)
+            )
+            return
+
+        full_region = sublime.Region(0, self.view.size())
+        original = self.view.substr(full_region)
+        blocks = find_top_level_html_blocks(original, ("figure", "div"))
+
+        if not blocks:
+            sublime.status_message("CleanMD: no top-level figure/div blocks found")
+            return
+
+        replacements = []
+        failures = []
+        counts = {"figure": 0, "div": 0}
+
+        for block in blocks:
+            start = block["start"]
+            end = block["end"]
+            fragment = original[start:end]
+            line_start = original.rfind("\n", 0, start) + 1
+            indent_match = re.match(r'[ \t]*', original[line_start:start])
+            base_indent = indent_match.group(0) if indent_match else ""
+
+            try:
+                formatted = format_html_fragment_with_prettier(fragment, prettier, base_indent=base_indent)
+                replacements.append((start, end, formatted))
+                counts[block["tag"]] = counts.get(block["tag"], 0) + 1
+            except Exception as exc:
+                failures.append((start, block["tag"], str(exc)))
+
+        for start, end, formatted in reversed(replacements):
+            self.view.replace(edit, sublime.Region(start, end), formatted)
+
+        figures = counts.get("figure", 0)
+        divs = counts.get("div", 0)
+        if failures:
+            message = "BirdyOz - Format HTML Blocks cleaned {} figure(s) and {} div(s); {} block(s) failed".format(
+                figures, divs, len(failures)
+            )
+        else:
+            message = "BirdyOz - Format HTML Blocks cleaned {} figure(s) and {} div(s)".format(
+                figures, divs
+            )
+
+        print(message)
+        for start, tag, error in failures:
+            print("CleanMD HTML format failed for {} at {}: {}".format(tag, start, error))
+        sublime.status_message(message)
