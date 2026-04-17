@@ -12,6 +12,8 @@ The package now has a narrow focus:
 
 HTML-to-Markdown conversion is no longer handled here. That responsibility now lives in the `MD-to-HTML` package via `StripMarkupCommand`.
 
+Use `CleanMD` for mixed Markdown documents, including Markdown files that contain embedded HTML blocks. For strict HTML documents, use `CleanHTML`.
+
 ## Settings
 
 `CleanMD` includes a package settings file:

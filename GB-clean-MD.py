@@ -287,7 +287,7 @@ def format_html_fragment_with_prettier(fragment, prettier_binary, prettier_confi
         formatted += "\n"
     return formatted
 
-def format_html_blocks_in_text(string, prettier_binary, config):
+def format_html_blocks_in_text(string, prettier_binary, config, formatter=None):
     """Format configured top-level HTML blocks within one text slice."""
     tag_names = tuple(config.get("html_block_tags", DEFAULT_CLEANMD_CONFIG["html_block_tags"]))
     blocks = find_top_level_html_blocks(string, tag_names)
@@ -295,6 +295,14 @@ def format_html_blocks_in_text(string, prettier_binary, config):
     replacements = []
     failures = []
     counts = {tag_name: 0 for tag_name in tag_names}
+    if formatter is None:
+        def formatter(fragment, base_indent):
+            return format_html_fragment_with_prettier(
+                fragment,
+                prettier_binary,
+                config.get("html_prettier", DEFAULT_CLEANMD_CONFIG["html_prettier"]),
+                base_indent=base_indent,
+            )
 
     for block in blocks:
         start = block["start"]
@@ -305,12 +313,7 @@ def format_html_blocks_in_text(string, prettier_binary, config):
         base_indent = indent_match.group(0) if indent_match else ""
 
         try:
-            formatted = format_html_fragment_with_prettier(
-                fragment,
-                prettier_binary,
-                config.get("html_prettier", DEFAULT_CLEANMD_CONFIG["html_prettier"]),
-                base_indent=base_indent,
-            )
+            formatted = formatter(fragment, base_indent)
             replacements.append((start, end, formatted))
             counts[block["tag"]] = counts.get(block["tag"], 0) + 1
         except Exception as exc:
@@ -624,6 +627,13 @@ class CleanMdRunTestsCommand(sublime_plugin.WindowCommand):
             }
         ]
 
+        html_block_test = {
+            "name": "Selection-slice HTML formatting leaves surrounding Markdown untouched",
+            "input": "## Heading\n<figure>\n<div>Text</div>\n</figure>\n\nTrailing paragraph",
+            "expected": "## Heading\nFORMATTED_BLOCK\n\nTrailing paragraph",
+            "counts": {"figure": 1, "div": 0},
+        }
+
         results = []
         passed = 0
 
@@ -644,9 +654,36 @@ class CleanMdRunTestsCommand(sublime_plugin.WindowCommand):
                 results.append(actual)
                 results.append("")
 
+        html_result = format_html_blocks_in_text(
+            html_block_test["input"],
+            prettier_binary="",
+            config=get_cleanmd_config(),
+            formatter=lambda fragment, base_indent: "FORMATTED_BLOCK\n",
+        )
+        html_ok = (
+            html_result["text"] == html_block_test["expected"]
+            and html_result["counts"].get("figure", 0) == html_block_test["counts"]["figure"]
+            and html_result["counts"].get("div", 0) == html_block_test["counts"]["div"]
+            and not html_result["failures"]
+        )
+        if html_ok:
+            passed += 1
+            results.append("PASS: {}".format(html_block_test["name"]))
+        else:
+            results.append("FAIL: {}".format(html_block_test["name"]))
+            results.append("INPUT:")
+            results.append(html_block_test["input"])
+            results.append("EXPECTED:")
+            results.append(html_block_test["expected"])
+            results.append("ACTUAL:")
+            results.append(html_result["text"])
+            results.append("COUNTS:")
+            results.append(str(html_result["counts"]))
+            results.append("")
+
         report = "CleanMD tests: {}/{} passed\n\n{}".format(
             passed,
-            len(test_cases),
+            len(test_cases) + 1,
             "\n".join(results)
         )
 
