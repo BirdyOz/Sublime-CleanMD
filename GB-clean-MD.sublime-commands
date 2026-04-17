@@ -4,6 +4,11 @@
         "command": "clean_md"
     },
     {
+        "caption": "BirdyOz - Clean MarkDown (No Format/Preview)",
+        "command": "clean_md",
+        "args": {"side_effects": false}
+    },
+    {
         "caption": "BirdyOz - Run CleanMD Tests",
         "command": "clean_md_run_tests"
     },

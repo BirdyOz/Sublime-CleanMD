@@ -1,0 +1,15 @@
+{
+    "promote_word_paragraph_breaks": true,
+    "normalize_html_fragments": true,
+    "add_safe_external_link_attrs": true,
+    "run_formatter_after_clean": true,
+    "open_preview_after_clean": true,
+    "html_block_tags": ["figure", "div"],
+    "html_prettier": {
+        "print_width": 800,
+        "tab_width": 4,
+        "html_whitespace_sensitivity": "css",
+        "prose_wrap": "preserve",
+        "embedded_language_formatting": "auto"
+    }
+}

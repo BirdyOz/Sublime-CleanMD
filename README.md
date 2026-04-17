@@ -12,6 +12,22 @@ The package now has a narrow focus:
 
 HTML-to-Markdown conversion is no longer handled here. That responsibility now lives in the `MD-to-HTML` package via `StripMarkupCommand`.
 
+## Settings
+
+`CleanMD` includes a package settings file:
+
+- [`CleanMD.sublime-settings`](/Users/gbird/Library/Application%20Support/Sublime%20Text/Packages/CleanMD/CleanMD.sublime-settings)
+
+The first-pass settings currently control:
+
+- whether likely Word paragraph breaks are promoted
+- whether HTML fragment normalisation runs at all
+- whether external raw HTML links get safe `target`/`rel` attributes
+- whether the cleanup command runs the formatter afterward
+- whether the cleanup command opens preview afterward
+- which top-level HTML tags are targeted by `BirdyOz - Format HTML Blocks`
+- the Prettier options used for HTML block formatting
+
 ## What CleanMD does
 
 When run on a Markdown document, `CleanMD` applies a string-to-string cleanup pass that:
@@ -30,6 +46,7 @@ When run on a Markdown document, `CleanMD` applies a string-to-string cleanup pa
 - simplifies `<li><p>...</p></li>` to `<li>...</li>`
 - removes only `width:` from inline image styles
 - adds `target="_blank"` and `rel="noopener noreferrer"` to external raw HTML links
+- reports a short cleanup summary in the status bar and console after each run
 
 ## HTML Block Formatting
 
@@ -54,6 +71,7 @@ If the current file is a `.docx`, the command uses `pandoc` to convert it to Git
 This package currently provides:
 
 - `clean_md`
+- `clean_md` with `side_effects: false`
 - `clean_md_run_tests`
 - `clean_md_format_html_blocks`
 - `clean_md_prettierd_smoke_test`
@@ -61,6 +79,7 @@ This package currently provides:
 Command palette caption:
 
 - `BirdyOz - Clean MarkDown`
+- `BirdyOz - Clean MarkDown (No Format/Preview)`
 - `BirdyOz - Format HTML Blocks`
 - `BirdyOz - Run CleanMD Tests`
 - `BirdyOz - Prettierd Smoke Test`

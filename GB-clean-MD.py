@@ -1,10 +1,81 @@
-import sublime, sublime_plugin, re, os, shutil, subprocess
+import os
+import re
+import shutil
+import subprocess
+
+import sublime
+import sublime_plugin
 from bs4 import BeautifulSoup
+
+DEFAULT_CLEANMD_CONFIG = {
+    "promote_word_paragraph_breaks": True,
+    "normalize_html_fragments": True,
+    "add_safe_external_link_attrs": True,
+    "run_formatter_after_clean": True,
+    "open_preview_after_clean": True,
+    "html_block_tags": ["figure", "div"],
+    "html_prettier": {
+        "print_width": 800,
+        "tab_width": 4,
+        "html_whitespace_sensitivity": "css",
+        "prose_wrap": "preserve",
+        "embedded_language_formatting": "auto",
+    },
+}
+
+def load_cleanmd_settings():
+    return sublime.load_settings("CleanMD.sublime-settings")
+
+def build_cleanmd_config(overrides=None, settings_obj=None):
+    settings = settings_obj or load_cleanmd_settings()
+    config = {
+        "promote_word_paragraph_breaks": settings.get(
+            "promote_word_paragraph_breaks",
+            DEFAULT_CLEANMD_CONFIG["promote_word_paragraph_breaks"],
+        ),
+        "normalize_html_fragments": settings.get(
+            "normalize_html_fragments",
+            DEFAULT_CLEANMD_CONFIG["normalize_html_fragments"],
+        ),
+        "add_safe_external_link_attrs": settings.get(
+            "add_safe_external_link_attrs",
+            DEFAULT_CLEANMD_CONFIG["add_safe_external_link_attrs"],
+        ),
+        "run_formatter_after_clean": settings.get(
+            "run_formatter_after_clean",
+            DEFAULT_CLEANMD_CONFIG["run_formatter_after_clean"],
+        ),
+        "open_preview_after_clean": settings.get(
+            "open_preview_after_clean",
+            DEFAULT_CLEANMD_CONFIG["open_preview_after_clean"],
+        ),
+        "html_block_tags": settings.get(
+            "html_block_tags",
+            list(DEFAULT_CLEANMD_CONFIG["html_block_tags"]),
+        ),
+        "html_prettier": dict(DEFAULT_CLEANMD_CONFIG["html_prettier"]),
+    }
+
+    html_prettier = settings.get("html_prettier", {})
+    if isinstance(html_prettier, dict):
+        config["html_prettier"].update(html_prettier)
+
+    if isinstance(overrides, dict):
+        for key, value in overrides.items():
+            if key == "html_prettier" and isinstance(value, dict):
+                config["html_prettier"].update(value)
+            else:
+                config[key] = value
+
+    return config
+
+def get_cleanmd_config():
+    return build_cleanmd_config()
 
 
 class CleanMd(sublime_plugin.TextCommand):
 
-    def run(self, edit):
+    def run(self, edit, side_effects=True):
 
         file_name = self.view.file_name() or ""
 
@@ -15,17 +86,27 @@ class CleanMd(sublime_plugin.TextCommand):
             md_name = file_name.replace(".docx", ".md")
             pandoc = "pandoc -f docx -t gfm " + file_name + " -o " + md_name + " --extract-media=" + assets_dir + " --wrap=none --columns=8000 --tab-stop=4"
             os.system(pandoc)
-            newView = self.view.window().open_file(md_name.replace("\\ "," "))
+            window = self.view.window()
+            if window is not None:
+                window.open_file(md_name.replace("\\ "," "))
 
         else:
-            replacestrings(self, edit)
+            overrides = None if side_effects else {
+                "run_formatter_after_clean": False,
+                "open_preview_after_clean": False,
+            }
+            replacestrings(self, edit, config_overrides=overrides)
 
-def normalize_html_fragments(string):
+def normalize_html_fragments(string, config=None):
     """Safely normalize img and anchor tags without reparsing the whole document."""
     if "<" not in string or ">" not in string:
-        return string
+        return string, {"img_tags_normalized": 0, "external_links_hardened": 0}
+    if config is None:
+        config = DEFAULT_CLEANMD_CONFIG
+    stats = {"img_tags_normalized": 0, "external_links_hardened": 0}
 
     def normalize_img_tag(match):
+        nonlocal stats
         tag_markup = match.group(0)
         soup = BeautifulSoup(tag_markup, "html.parser")
         tag = soup.find("img")
@@ -33,7 +114,7 @@ def normalize_html_fragments(string):
             return tag_markup
 
         style = tag.get("style")
-        if style:
+        if isinstance(style, str) and style:
             rules = []
             for rule in style.split(";"):
                 rule = rule.strip()
@@ -47,10 +128,12 @@ def normalize_html_fragments(string):
                 tag["style"] = "; ".join(rules)
             else:
                 del tag["style"]
+            stats["img_tags_normalized"] += 1
 
         return str(tag)
 
     def normalize_anchor_open_tag(match):
+        nonlocal stats
         open_tag = match.group(0)
         soup = BeautifulSoup(open_tag + "</a>", "html.parser")
         tag = soup.find("a")
@@ -58,13 +141,16 @@ def normalize_html_fragments(string):
             return open_tag
 
         href = tag.get("href", "")
+        if not isinstance(href, str):
+            href = ""
         if tag.has_attr("target"):
             del tag["target"]
         if tag.has_attr("rel"):
             del tag["rel"]
         if re.match(r"^https?://", href, flags=re.IGNORECASE):
             tag["target"] = "_blank"
-            tag["rel"] = ["noopener", "noreferrer"]
+            tag["rel"] = "noopener noreferrer"
+            stats["external_links_hardened"] += 1
 
         serialised = str(tag)
         if serialised.endswith("</a>"):
@@ -72,8 +158,9 @@ def normalize_html_fragments(string):
         return open_tag
 
     string = re.sub(r"<img\b[^>]*?>", normalize_img_tag, string, flags=re.IGNORECASE | re.DOTALL)
-    string = re.sub(r"<a\b[^>]*?>", normalize_anchor_open_tag, string, flags=re.IGNORECASE | re.DOTALL)
-    return string
+    if config.get("add_safe_external_link_attrs", True):
+        string = re.sub(r"<a\b[^>]*?>", normalize_anchor_open_tag, string, flags=re.IGNORECASE | re.DOTALL)
+    return string, stats
 
 def find_top_level_html_blocks(string, tag_names=("figure", "div")):
     """Return source ranges for top-level figure/div blocks that begin a line."""
@@ -162,7 +249,7 @@ def repair_nested_paragraph_wrappers(fragment):
 
     return str(soup)
 
-def format_html_fragment_with_prettier(fragment, prettier_binary, base_indent=""):
+def format_html_fragment_with_prettier(fragment, prettier_binary, prettier_config, base_indent=""):
     """Format one HTML fragment with Prettier via stdin/stdout."""
     had_trailing_newline = fragment.endswith("\n")
     fragment = repair_nested_paragraph_wrappers(fragment)
@@ -172,15 +259,15 @@ def format_html_fragment_with_prettier(fragment, prettier_binary, base_indent=""
             "--parser",
             "html",
             "--print-width",
-            "800",
+            str(prettier_config.get("print_width", 800)),
             "--tab-width",
-            "4",
+            str(prettier_config.get("tab_width", 4)),
             "--html-whitespace-sensitivity",
-            "css",
+            prettier_config.get("html_whitespace_sensitivity", "css"),
             "--prose-wrap",
-            "preserve",
+            prettier_config.get("prose_wrap", "preserve"),
             "--embedded-language-formatting",
-            "auto",
+            prettier_config.get("embedded_language_formatting", "auto"),
             "--stdin-filepath",
             "/tmp/cleanmd-html-fragment.html",
         ],
@@ -199,6 +286,45 @@ def format_html_fragment_with_prettier(fragment, prettier_binary, base_indent=""
     if had_trailing_newline:
         formatted += "\n"
     return formatted
+
+def format_html_blocks_in_text(string, prettier_binary, config):
+    """Format configured top-level HTML blocks within one text slice."""
+    tag_names = tuple(config.get("html_block_tags", DEFAULT_CLEANMD_CONFIG["html_block_tags"]))
+    blocks = find_top_level_html_blocks(string, tag_names)
+
+    replacements = []
+    failures = []
+    counts = {tag_name: 0 for tag_name in tag_names}
+
+    for block in blocks:
+        start = block["start"]
+        end = block["end"]
+        fragment = string[start:end]
+        line_start = string.rfind("\n", 0, start) + 1
+        indent_match = re.match(r'[ \t]*', string[line_start:start])
+        base_indent = indent_match.group(0) if indent_match else ""
+
+        try:
+            formatted = format_html_fragment_with_prettier(
+                fragment,
+                prettier_binary,
+                config.get("html_prettier", DEFAULT_CLEANMD_CONFIG["html_prettier"]),
+                base_indent=base_indent,
+            )
+            replacements.append((start, end, formatted))
+            counts[block["tag"]] = counts.get(block["tag"], 0) + 1
+        except Exception as exc:
+            failures.append((start, block["tag"], str(exc)))
+
+    for start, end, formatted in reversed(replacements):
+        string = string[:start] + formatted + string[end:]
+
+    return {
+        "text": string,
+        "blocks": blocks,
+        "counts": counts,
+        "failures": failures,
+    }
 
 def is_blockish_line(stripped):
     """Return True for lines that should not be treated as plain paragraph text."""
@@ -236,9 +362,10 @@ def promote_word_paragraph_breaks(string):
     """
     lines = string.splitlines()
     if len(lines) < 2:
-        return string
+        return string, 0
 
     newlines = []
+    inserted = 0
     for index, line in enumerate(lines):
         newlines.append(line)
 
@@ -253,11 +380,22 @@ def promote_word_paragraph_breaks(string):
 
         if looks_like_complete_paragraph_line(current) and looks_like_complete_paragraph_line(nxt):
             newlines.append('')
+            inserted += 1
 
-    return '\n'.join(newlines)
+    return '\n'.join(newlines), inserted
 
-def clean_md_text(string):
-    """Apply the canonical markdown cleanup rules to a string."""
+def clean_md_result(string, config=None):
+    """Apply the canonical markdown cleanup rules and return text plus summary stats."""
+    if config is None:
+        config = get_cleanmd_config()
+    stats = {
+        "regex_replacements": 0,
+        "html_img_tags_normalized": 0,
+        "html_external_links_hardened": 0,
+        "word_paragraph_breaks_promoted": 0,
+        "list_blank_lines_inserted": 0,
+    }
+
     substitutions = [
         ('^( *)[-\\+·•ð§] +', '\\1- '),       # Replace decorative bullets with -
         ('^\\\\(\\d+\\.) +', '\\1 '),          # Replace escaped \1. etc with 1.
@@ -276,10 +414,16 @@ def clean_md_text(string):
     ]
 
     for old, new in substitutions:
+        stats["regex_replacements"] += len(re.findall(old, string, flags=re.MULTILINE))
         string = re.sub(old, new, string, flags=re.MULTILINE)
 
-    string = normalize_html_fragments(string)
-    string = promote_word_paragraph_breaks(string)
+    if config.get("normalize_html_fragments", True):
+        string, html_stats = normalize_html_fragments(string, config=config)
+        stats["html_img_tags_normalized"] = html_stats["img_tags_normalized"]
+        stats["html_external_links_hardened"] = html_stats["external_links_hardened"]
+    if config.get("promote_word_paragraph_breaks", True):
+        string, promoted = promote_word_paragraph_breaks(string)
+        stats["word_paragraph_breaks_promoted"] = promoted
 
     lines = string.splitlines()
     newlines = []
@@ -292,6 +436,7 @@ def clean_md_text(string):
             # Add a blank line in before first line item
             if not inside_list:
                 newlines.append('')
+                stats["list_blank_lines_inserted"] += 1
             newlines.append(line)
             inside_list = True
             blank_line = False
@@ -301,21 +446,43 @@ def clean_md_text(string):
         else:
             # Add a blank line back in if the current line is not a list item
             # and the previous line was blank
-            if blank_line:
+            if blank_line or inside_list:
                 newlines.append('')
+                stats["list_blank_lines_inserted"] += 1
             newlines.append(line)
             inside_list = False
             blank_line = False
-    return '\n'.join(newlines)
+    return {
+        "text": '\n'.join(newlines),
+        "stats": stats,
+    }
+
+def clean_md_text(string, config=None):
+    """Apply the canonical markdown cleanup rules to a string."""
+    return clean_md_result(string, config=config)["text"]
+
+def format_cleanmd_summary(stats):
+    return (
+        "CleanMD: {regex} replacements; {imgs} img tag(s); {links} external link(s); "
+        "{paras} paragraph break(s); {lists} list spacer(s)"
+    ).format(
+        regex=stats["regex_replacements"],
+        imgs=stats["html_img_tags_normalized"],
+        links=stats["html_external_links_hardened"],
+        paras=stats["word_paragraph_breaks_promoted"],
+        lists=stats["list_blank_lines_inserted"],
+    )
 
 # Perform all text substitutions and string manipulations
-def replacestrings(self, edit):
+def replacestrings(self, edit, config_overrides=None):
     # select all
     self.view.run_command("select_all")
     # convert to string
     sel = self.view.sel()
     string = self.view.substr(sel[0])
-    string = clean_md_text(string)
+    config = build_cleanmd_config(overrides=config_overrides)
+    result = clean_md_result(string, config=config)
+    string = result["text"]
 
     # # Add Bootstrap support
     # bootstrap = '<link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/css/bootstrap.min.css" integrity="sha384-Vkoo8x4CGsO3+Hhxv8T/Q5PaXtkKtu6ug5TOeNV6gBiFeWPGFN9MuhOf23Q9Ifjh" crossorigin="anonymous">\n<script src="https://code.jquery.com/jquery-3.4.1.slim.min.js" integrity="sha384-J6qa4849blE2+poT4WnyKhv5vZF5SrPo0iEjwBvKU7imGFAV0wwj1yYfoRSJoZ+n" crossorigin="anonymous"></script>\n<script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.0/dist/umd/popper.min.js" integrity="sha384-Q6E9RHvbIyZFJoft+2mJbHaEWldlvI9IOYy5n3zV9zzTtmI3UksdQRVvoxMfooAo" crossorigin="anonymous"></script>\n<script src="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/js/bootstrap.min.js" integrity="sha384-wfSDF2E50Y2D1uUdj0O3uMBJnjuUD4Ih7YwaYd1iqfktj0Uod8GCExl3Og8ifwB6" crossorigin="anonymous"></script>\n<link href="https://netdna.bootstrapcdn.com/font-awesome/4.7.0/css/font-awesome.min.css" rel="stylesheet">\n<style> h1, h2 {clear: both; color: maroon; } body {counter-reset: h1; } h1 {counter-reset: h2; counter-increment: h1; border-top: 10px double maroon; padding-top: 1em; margin-top: 3em !important} h1::before {content: counter(h1) ". "; color: black; font-weight: normal; font-size: 0.5em; vertical-align: middle; } h2 {counter-increment: h2; border-top: 2px dotted maroon; padding-top: 1em} h2::before {content: counter(h1) "." counter(h2) " "; color: black; font-weight: normal; font-size: 0.5em; vertical-align: middle; } h2[data-question]::before {content: attr(data-question) ": "; } h2[data-type]::after {content: " [" attr(data-type) "]"; font-size: 0.5em; font-weight: normal; color: black; vertical-align: middle; }</style>\n\n'
@@ -326,17 +493,23 @@ def replacestrings(self, edit):
 
     # Output to view
     self.view.replace(edit, sel[0], string)
+    summary = format_cleanmd_summary(result["stats"])
+    print(summary)
+    self.view.set_status("CleanMD summary", summary)
+    sublime.set_timeout(lambda: self.view.erase_status("CleanMD summary"), 8000)
 
     # Launch in browser
     if self.view.window() is not None:
-        try:
-            self.view.run_command("run_format", {"uid": "prettier", "type": "beautifier"})
-        except Exception:
-            pass
-        try:
-            self.view.run_command("omni_markup_preview")
-        except Exception:
-            pass
+        if config.get("run_formatter_after_clean", True):
+            try:
+                self.view.run_command("run_format", {"uid": "prettier", "type": "beautifier"})
+            except Exception:
+                pass
+        if config.get("open_preview_after_clean", True):
+            try:
+                self.view.run_command("omni_markup_preview")
+            except Exception:
+                pass
 
 class CleanMdRunTestsCommand(sublime_plugin.WindowCommand):
 
@@ -408,6 +581,11 @@ class CleanMdRunTestsCommand(sublime_plugin.WindowCommand):
                 "expected": "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\n\n- One\n- Two"
             },
             {
+                "name": "Insert blank line before paragraph after list",
+                "input": "Leading para\n- one\n- two\n- three\nTrailing para",
+                "expected": "Leading para\n\n- one\n- two\n- three\n\nTrailing para"
+            },
+            {
                 "name": "Simplify li paragraph wrappers",
                 "input": "<ul>\n<li><p>One</p></li>\n<li><p>Two</p></li>\n</ul>",
                 "expected": "<ul>\n<li>One</li>\n<li>Two</li>\n</ul>"
@@ -431,6 +609,18 @@ class CleanMdRunTestsCommand(sublime_plugin.WindowCommand):
                 "name": "Remove trailing blank lines at end of file",
                 "input": "Last paragraph\n\n\n",
                 "expected": "Last paragraph"
+            },
+            {
+                "name": "Disable Word paragraph promotion via config",
+                "input": "Sentence one.\nSentence two.",
+                "expected": "Sentence one.\nSentence two.",
+                "config": {"promote_word_paragraph_breaks": False}
+            },
+            {
+                "name": "Disable HTML fragment normalization via config",
+                "input": '<p><a href="https://example.com">External</a> <img src="image.png" style="width: 300px; border: 1px solid red"></p>',
+                "expected": '<p><a href="https://example.com">External</a> <img src="image.png" style="width: 300px; border: 1px solid red"></p>',
+                "config": {"normalize_html_fragments": False}
             }
         ]
 
@@ -438,7 +628,8 @@ class CleanMdRunTestsCommand(sublime_plugin.WindowCommand):
         passed = 0
 
         for case in test_cases:
-            actual = clean_md_text(case["input"])
+            config = build_cleanmd_config(overrides=case.get("config", {}))
+            actual = clean_md_text(case["input"], config=config)
             ok = actual == case["expected"]
             if ok:
                 passed += 1
@@ -602,6 +793,7 @@ class CleanMdPrettierdSmokeTestCommand(sublime_plugin.WindowCommand):
 class CleanMdFormatHtmlBlocksCommand(sublime_plugin.TextCommand):
 
     def run(self, edit):
+        config = get_cleanmd_config()
         prettier = shutil.which("prettier") or "/opt/homebrew/bin/prettier"
         if not os.path.exists(prettier):
             sublime.message_dialog(
@@ -609,45 +801,50 @@ class CleanMdFormatHtmlBlocksCommand(sublime_plugin.TextCommand):
             )
             return
 
-        full_region = sublime.Region(0, self.view.size())
-        original = self.view.substr(full_region)
-        blocks = find_top_level_html_blocks(original, ("figure", "div"))
-
-        if not blocks:
-            sublime.status_message("CleanMD: no top-level figure/div blocks found")
-            return
-
-        replacements = []
+        non_empty_regions = [region for region in self.view.sel() if not region.empty()]
         failures = []
         counts = {"figure": 0, "div": 0}
+        total_blocks = 0
 
-        for block in blocks:
-            start = block["start"]
-            end = block["end"]
-            fragment = original[start:end]
-            line_start = original.rfind("\n", 0, start) + 1
-            indent_match = re.match(r'[ \t]*', original[line_start:start])
-            base_indent = indent_match.group(0) if indent_match else ""
+        if non_empty_regions:
+            scope_label = "selection(s)"
+            for region in sorted(non_empty_regions, key=lambda r: r.begin(), reverse=True):
+                original = self.view.substr(region)
+                result = format_html_blocks_in_text(original, prettier, config)
+                total_blocks += len(result["blocks"])
+                for tag, count in result["counts"].items():
+                    counts[tag] = counts.get(tag, 0) + count
+                for start, tag, error in result["failures"]:
+                    failures.append((region.begin() + start, tag, error))
+                if original != result["text"]:
+                    self.view.replace(edit, region, result["text"])
+        else:
+            scope_label = "file"
+            full_region = sublime.Region(0, self.view.size())
+            original = self.view.substr(full_region)
+            result = format_html_blocks_in_text(original, prettier, config)
+            total_blocks = len(result["blocks"])
+            counts = result["counts"]
+            failures = result["failures"]
+            if original != result["text"]:
+                self.view.replace(edit, full_region, result["text"])
 
-            try:
-                formatted = format_html_fragment_with_prettier(fragment, prettier, base_indent=base_indent)
-                replacements.append((start, end, formatted))
-                counts[block["tag"]] = counts.get(block["tag"], 0) + 1
-            except Exception as exc:
-                failures.append((start, block["tag"], str(exc)))
-
-        for start, end, formatted in reversed(replacements):
-            self.view.replace(edit, sublime.Region(start, end), formatted)
+        if total_blocks == 0:
+            if non_empty_regions:
+                sublime.status_message("CleanMD: no configured top-level HTML blocks found in selection(s)")
+            else:
+                sublime.status_message("CleanMD: no configured top-level HTML blocks found")
+            return
 
         figures = counts.get("figure", 0)
         divs = counts.get("div", 0)
         if failures:
-            message = "BirdyOz - Format HTML Blocks cleaned {} figure(s) and {} div(s); {} block(s) failed".format(
-                figures, divs, len(failures)
+            message = "BirdyOz - Format HTML Blocks cleaned {} figure(s) and {} div(s) in {}; {} block(s) failed".format(
+                figures, divs, scope_label, len(failures)
             )
         else:
-            message = "BirdyOz - Format HTML Blocks cleaned {} figure(s) and {} div(s)".format(
-                figures, divs
+            message = "BirdyOz - Format HTML Blocks cleaned {} figure(s) and {} div(s) in {}".format(
+                figures, divs, scope_label
             )
 
         print(message)
